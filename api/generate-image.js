@@ -14,43 +14,47 @@ export default async function handler(req, res) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY not set" });
 
-  // Map WriteCoach ratios to Imagen-supported ratios
-  const ratioMap = { "1:1": "1:1", "2:3": "3:4", "16:9": "16:9", "9:16": "9:16" };
-  const mappedRatio = ratioMap[aspectRatio] || "1:1";
   const n = Math.min(Math.max(Number(count) || 1, 1), 4);
-  const fullPrompt = `${prompt}. Style: ${style || "Realistic"}.`;
 
-  try {
+  const ratioGuidance = {
+    "1:1": "square format",
+    "2:3": "portrait orientation",
+    "16:9": "wide landscape format",
+    "9:16": "tall vertical format",
+  };
+  const orientation = ratioGuidance[aspectRatio] || "square format";
+  const fullPrompt = `${prompt}. Style: ${style || "Realistic"}. Composition: ${orientation}.`;
+
+  const generateOne = async () => {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          instances: [{ prompt: fullPrompt }],
-          parameters: { sampleCount: n, aspectRatio: mappedRatio },
+          contents: [{ parts: [{ text: fullPrompt }] }],
+          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
         }),
       }
     );
 
     if (!response.ok) {
       const errText = await response.text();
-      return res.status(response.status).json({
-        error: `Imagen API error (${response.status}): ${errText}`,
-      });
+      throw new Error(`Gemini API error (${response.status}): ${errText}`);
     }
 
     const data = await response.json();
-    const predictions = data?.predictions || [];
-    const images = predictions
-      .map((p) => p?.bytesBase64Encoded)
-      .filter(Boolean)
-      .map((b64) => `data:image/png;base64,${b64}`);
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find((p) => p.inline_data || p.inlineData);
+    const b64 = imagePart?.inline_data?.data || imagePart?.inlineData?.data;
+    const mime = imagePart?.inline_data?.mime_type || imagePart?.inlineData?.mimeType || "image/png";
 
-    if (images.length === 0) {
-      return res.status(500).json({ error: "No image returned by the API." });
-    }
+    if (!b64) throw new Error("No image returned by the model.");
+    return `data:${mime};base64,${b64}`;
+  };
 
+  try {
+    const images = await Promise.all(Array.from({ length: n }, () => generateOne()));
     return res.status(200).json({ images });
   } catch (err) {
     return res.status(500).json({ error: err.message || "Image generation failed." });
